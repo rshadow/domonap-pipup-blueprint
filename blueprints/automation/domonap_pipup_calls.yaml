@@ -1,0 +1,223 @@
+# SPDX-License-Identifier: GPL-3.0-only
+blueprint:
+  name: "Domonap: видео звонка на ТВ через PiPup"
+  description: >-
+    Показывает камеру и фото соответствующей двери при входящем звонке.
+    Камера и фото находятся по устройству датчика, включая новые двери.
+    Требуются интеграции Domonap и PiPup для HA и приложение PiPup с WHEP.
+    Приставки выбираются как устройства интеграции PiPup.
+    Скрывает окно после завершения звонка с заданной задержкой.
+    Повторный звонок отменяет ожидающее скрытие; окна разных дверей независимы.
+  domain: automation
+  source_url: https://github.com/rshadow/domonap-pipup-blueprint/blob/main/blueprints/automation/domonap_pipup_calls.yaml
+  homeassistant:
+    min_version: "2026.11.0"
+  input:
+    connections:
+      name: Подключения
+      input:
+        domonap_entry:
+          name: Аккаунт Domonap
+          selector:
+            config_entry:
+              integration: domonap
+        tvs:
+          name: Приставки PiPup
+          selector:
+            device:
+              integration: pipup
+              multiple: true
+        excluded_doors:
+          name: Исключённые двери
+          default: []
+          selector:
+            device:
+              integration: domonap
+              multiple: true
+        ha_url:
+          name: Адрес HA для фотографий
+          description: >-
+            Необязательно. По умолчанию используется адрес HA из WHEP-ссылки
+            Domonap. Укажите другой адрес, если приставка не может его открыть.
+          default: ""
+          selector:
+            text:
+    behavior:
+      name: Показ и скрытие
+      input:
+        max_duration:
+          name: Максимальное время показа
+          default: 180
+          selector:
+            number:
+              min: 5
+              max: 1800
+              unit_of_measurement: s
+              mode: box
+        hide_delay:
+          name: Задержка скрытия после завершения звонка
+          default: 5
+          selector:
+            number:
+              min: 0
+              max: 60
+              unit_of_measurement: s
+              mode: box
+        audio:
+          name: Звук камеры
+          default: true
+          selector:
+            boolean:
+        show_poster:
+          name: Фото звонка до первого кадра видео
+          default: true
+          selector:
+            boolean:
+    appearance:
+      name: Вид окна
+      input:
+        position:
+          name: Положение
+          default: bottom_right
+          selector:
+            select:
+              options:
+                - top_right
+                - top_left
+                - bottom_right
+                - bottom_left
+                - top_center
+                - bottom_center
+                - center_left
+                - center_right
+                - center
+        media_width:
+          name: Ширина видео
+          default: 640
+          selector:
+            number:
+              min: 160
+              max: 3840
+              unit_of_measurement: px
+              mode: box
+        media_height:
+          name: Высота видео
+          default: 480
+          selector:
+            number:
+              min: 120
+              max: 2160
+              unit_of_measurement: px
+              mode: box
+        animation:
+          name: Анимация
+          default: none
+          selector:
+            select:
+              options:
+                - none
+                - fade
+                - slide_left
+                - slide_right
+                - slide_top
+                - slide_bottom
+
+mode: parallel
+max: 20
+trace:
+  stored_traces: 0
+
+variables:
+  domonap_entry: !input domonap_entry
+  excluded_doors: !input excluded_doors
+  ha_url: !input ha_url
+  audio: !input audio
+  show_poster: !input show_poster
+
+triggers:
+  - trigger: event
+    event_type: state_changed
+
+conditions:
+  - condition: template
+    value_template: >-
+      {% set event = trigger.event.data %}
+      {{ event.entity_id.startswith('binary_sensor.')
+         and event.old_state is not none
+         and event.new_state is not none
+         and event.old_state.state in ['off', 'on']
+         and event.new_state.state in ['off', 'on']
+         and event.old_state.state != event.new_state.state
+         and event.new_state.attributes.get('device_class') == 'running'
+         and event.entity_id in integration_entities('domonap')
+         and config_entry_id(event.entity_id) == domonap_entry
+         and device_id(event.entity_id) is not none
+         and device_id(event.entity_id) not in excluded_doors }}
+
+actions:
+  - variables:
+      sensor_entity: "{{ trigger.event.data.entity_id }}"
+      door_device: "{{ device_id(sensor_entity) }}"
+      popup_id: "{{ 'domonap_' ~ door_device }}"
+  - choose:
+      - conditions: "{{ trigger.event.data.new_state.state == 'on' }}"
+        sequence:
+          - variables:
+              door_entities: >-
+                {% set found = namespace(entities=[]) %}
+                {% for entity in device_entities(door_device) %}
+                  {% if config_entry_id(entity) == domonap_entry %}
+                    {% set found.entities = found.entities + [entity] %}
+                  {% endif %}
+                {% endfor %}
+                {{ found.entities }}
+              cameras: "{{ door_entities | select('match', '^camera[.]') | list }}"
+              photos: "{{ door_entities | select('match', '^image[.]') | list }}"
+          - condition: template
+            value_template: "{{ cameras | count == 1 }}"
+          - variables:
+              camera_entity: "{{ cameras[0] }}"
+              photo_entity: "{{ photos[0] if photos | count == 1 else '' }}"
+              whep_url: "{{ state_attr(camera_entity, 'go2rtc_webrtc_url') or '' }}"
+          - condition: template
+            value_template: >-
+              {{ whep_url is string and whep_url.startswith(('http://', 'https://')) }}
+          - variables:
+              poster_url: >-
+                {% set picture = state_attr(photo_entity, 'entity_picture')
+                   if photo_entity else none %}
+                {% set base = ha_url.rstrip('/') if ha_url
+                   else whep_url.split('/')[:3] | join('/') %}
+                {{ base ~ picture ~ ('&' if '?' in picture else '?')
+                   ~ 'v=' ~ (now().timestamp() | int)
+                   if show_poster and picture is string and picture.startswith('/')
+                   else '' }}
+          - action: pipup.show
+            target:
+              device_id: !input tvs
+            data:
+              popup_id: "{{ popup_id }}"
+              title: "{{ state_attr(camera_entity, 'friendly_name') }}"
+              duration: !input max_duration
+              position: !input position
+              whep_url: "{{ whep_url }}"
+              poster_url: "{{ poster_url }}"
+              media_width: !input media_width
+              media_height: !input media_height
+              muted: "{{ not audio }}"
+              animation: !input animation
+              live_badge: true
+    default:
+      - delay:
+          seconds: !input hide_delay
+      # Проверка времени перехода не позволяет старому таймеру скрыть повторный звонок.
+      - condition: template
+        value_template: >-
+          {{ is_state(sensor_entity, 'off')
+             and as_timestamp(states[sensor_entity].last_changed)
+                 == as_timestamp(trigger.event.data.new_state.last_changed) }}
+      - action: pipup.dismiss
+        target:
+          device_id: !input tvs
+        data:
+          popup_id: "{{ popup_id }}"
