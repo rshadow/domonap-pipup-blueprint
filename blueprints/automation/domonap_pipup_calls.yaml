@@ -68,6 +68,27 @@ blueprint:
           default: true
           selector:
             boolean:
+        wake_device:
+          name: Включать устройство перед показом камеры
+          description: >-
+            Проверяет состояние экрана через PiPup и при необходимости включает
+            устройство. Видео отправляется после подтверждения включения.
+            PiPup должен оставаться доступным по сети в режиме ожидания.
+          default: false
+          selector:
+            boolean:
+        wake_timeout:
+          name: Время ожидания включения
+          description: >-
+            Используется при включённой галочке пробуждения. Если устройство
+            не подтвердило включение вовремя, показ на нём пропускается.
+          default: 15
+          selector:
+            number:
+              min: 1
+              max: 120
+              unit_of_measurement: s
+              mode: box
         show_poster:
           name: Фото звонка до первого кадра видео
           default: true
@@ -133,6 +154,7 @@ variables:
   ha_url: !input ha_url
   audio: !input audio
   show_poster: !input show_poster
+  wake_device: !input wake_device
 
 triggers:
   - trigger: event
@@ -192,21 +214,64 @@ actions:
                    ~ 'v=' ~ (now().timestamp() | int)
                    if show_poster and picture is string and picture.startswith('/')
                    else '' }}
-          - action: pipup.show
-            target:
-              device_id: !input tvs
-            data:
-              popup_id: "{{ popup_id }}"
-              title: "{{ state_attr(camera_entity, 'friendly_name') }}"
-              duration: !input max_duration
-              position: !input position
-              whep_url: "{{ whep_url }}"
-              poster_url: "{{ poster_url }}"
-              media_width: !input media_width
-              media_height: !input media_height
-              muted: "{{ not audio }}"
-              animation: !input animation
-              live_badge: true
+          - repeat:
+              for_each: !input tvs
+              sequence:
+                - variables:
+                    tv_device: "{{ repeat.item }}"
+                    tv_players: >-
+                      {{ device_entities(tv_device)
+                         | select('in', integration_entities('pipup'))
+                         | select('match', '^media_player[.]') | list }}
+                    tv_player: "{{ tv_players[0] if tv_players | count == 1 else '' }}"
+                - if:
+                    - condition: template
+                      value_template: >-
+                        {{ wake_device and tv_player
+                           and not is_state(tv_player, 'on') }}
+                  then:
+                    - action: media_player.turn_on
+                      continue_on_error: true
+                      target:
+                        entity_id: "{{ tv_player }}"
+                    - wait_template: "{{ is_state(tv_player, 'on') }}"
+                      timeout:
+                        seconds: !input wake_timeout
+                      continue_on_timeout: true
+                - choose:
+                    - conditions: >-
+                        {{ not wake_device
+                           or (tv_player and is_state(tv_player, 'on')) }}
+                      sequence:
+                        - condition: template
+                          value_template: >-
+                            {{ not wake_device
+                               or (is_state(sensor_entity, 'on')
+                                   and as_timestamp(states[sensor_entity].last_changed)
+                                       == as_timestamp(trigger.event.data.new_state.last_changed)) }}
+                        - action: pipup.show
+                          continue_on_error: true
+                          target:
+                            device_id: "{{ tv_device }}"
+                          data:
+                            popup_id: "{{ popup_id }}"
+                            title: "{{ state_attr(camera_entity, 'friendly_name') }}"
+                            duration: !input max_duration
+                            position: !input position
+                            whep_url: "{{ whep_url }}"
+                            poster_url: "{{ poster_url }}"
+                            media_width: !input media_width
+                            media_height: !input media_height
+                            muted: "{{ not audio }}"
+                            animation: !input animation
+                            live_badge: true
+                  default:
+                    - action: system_log.write
+                      data:
+                        level: warning
+                        message: >-
+                          Domonap PiPup: устройство {{ tv_device }} не подтвердило
+                          включение или его media_player недоступен; показ пропущен.
     default:
       - delay:
           seconds: !input hide_delay
