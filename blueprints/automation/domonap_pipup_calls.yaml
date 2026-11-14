@@ -130,6 +130,26 @@ blueprint:
               max: 2160
               unit_of_measurement: px
               mode: box
+        poster_mode:
+          name: Режим фото перед видео
+          description: >-
+            Явный режим вписывает фото в заданные размеры видео, не меняя размер
+            окна. Требует PiPup 0.32.0-beta.4 и HA-интеграцию 1.32.0b4 или новее.
+            «Не переопределять» не передаёт параметр и сохраняет поведение PiPup.
+          default: ""
+          selector:
+            select:
+              options:
+                - value: ""
+                  label: Не переопределять
+                - value: fit
+                  label: Вписать целиком (fit)
+                - value: fill
+                  label: Заполнить с обрезкой (fill)
+                - value: stretch
+                  label: Растянуть (stretch)
+                - value: center
+                  label: По центру без масштабирования (center)
         animation:
           name: Анимация
           default: none
@@ -154,6 +174,7 @@ variables:
   ha_url: !input ha_url
   audio: !input audio
   show_poster: !input show_poster
+  poster_mode: !input poster_mode
   wake_device: !input wake_device
 
 triggers:
@@ -214,6 +235,19 @@ actions:
                    ~ 'v=' ~ (now().timestamp() | int)
                    if show_poster and picture is string and picture.startswith('/')
                    else '' }}
+          - variables:
+              popup_data:
+                popup_id: "{{ popup_id }}"
+                title: "{{ state_attr(camera_entity, 'friendly_name') }}"
+                duration: !input max_duration
+                position: !input position
+                whep_url: "{{ whep_url }}"
+                poster_url: "{{ poster_url }}"
+                media_width: !input media_width
+                media_height: !input media_height
+                muted: "{{ not audio }}"
+                animation: !input animation
+                live_badge: true
           - repeat:
               for_each: !input tvs
               sequence:
@@ -253,18 +287,9 @@ actions:
                           continue_on_error: true
                           target:
                             device_id: "{{ tv_device }}"
-                          data:
-                            popup_id: "{{ popup_id }}"
-                            title: "{{ state_attr(camera_entity, 'friendly_name') }}"
-                            duration: !input max_duration
-                            position: !input position
-                            whep_url: "{{ whep_url }}"
-                            poster_url: "{{ poster_url }}"
-                            media_width: !input media_width
-                            media_height: !input media_height
-                            muted: "{{ not audio }}"
-                            animation: !input animation
-                            live_badge: true
+                          data: >-
+                            {{ dict(popup_data, poster_mode=poster_mode)
+                               if poster_mode else popup_data }}
                   default:
                     - action: system_log.write
                       data:
